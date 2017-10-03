@@ -7,6 +7,7 @@
 #include <ctype.h>
 #include <glib.h>
 #include <arpa/inet.h>
+#include <time.h>
 
 int sockfd, connfd;
 struct sockaddr_in server, client;
@@ -17,14 +18,23 @@ char webpage[] =
 "<title>Test page</title>\n</head>\n"
 "<body>Yeahboi</body>\n</html>";
 
-/*void closeConnection() {
-	shutdown(connfd, SHUT_RDWR);
-	close(connfd);
-}
+void logInfo() {
+	GString* logStr;
+	time_t timeStamp = time(NULL);
+	char portStr[5];
+	sprintf(portStr, "%d", ntohs(client.sin_port));
 
-void loop() {
-	
-}*/
+	logStr = g_string_new(" : ");
+	g_string_prepend(logStr, asctime(localtime(&timeStamp)));
+	g_string_append(logStr, inet_ntoa(client.sin_addr));
+	g_string_append(logStr, ":");
+	g_string_append(logStr, portStr);
+	g_string_append(logStr, "\n");
+
+	FILE *logFile = fopen("../log.txt", "a");
+	fputs(logStr->str, logFile);
+	fclose(logFile);
+}
 
 int main(int argc, char *argv[])
 {
@@ -35,7 +45,7 @@ int main(int argc, char *argv[])
 
 	int myPort = atoi(argv[1]);
 	char payload[2048];
-	socklen_t sin_len = sizeof(client);
+	socklen_t cliLen = sizeof(client);
 
 	sockfd = socket(AF_INET, SOCK_STREAM, 0);
 	memset(&server, 0, sizeof(server));
@@ -59,38 +69,25 @@ int main(int argc, char *argv[])
 	printf("Listening on port %d \n", myPort);
 	listen(sockfd, 1);
 
-	/*while(1) {
-		printf("Loopyloop");
-		socklen_t len = (socklen_t) sizeof(client);
-		connfd = accept(sockfd, (struct sockaddr *) &client, &len);
-
-		if(connfd < 0) {
-			perror("Accepting connection failed.");
-			exit(1);
-		}
-
-		// TODO add timestamp
-		printf("timestamp : %s:%d", inet_ntoa(client.sin_addr), ntohs(client.sin_port));
-
-	}*/
-
 	while(1)
     {
-        connfd = accept(sockfd, (struct sockaddr *) &client, &sin_len);
+		connfd = accept(sockfd, (struct sockaddr *) &client, &cliLen);
 
         if(connfd == -1) {
-            perror("Connection failed...\n");
+            perror("Accepting connection failed..\n");
             close(sockfd);
             continue;
         }
 
-        printf("Got client connection.....\n");
+		printf("Got client connection..\n\n");
+		logInfo();
+
         if(!fork()) {
 
             close(sockfd);
             memset(payload, 0, 2048);
             read(connfd, payload, 2047);
-            printf("%s\n", payload);
+            //printf("%s\n", payload);
 
             write(connfd, webpage, sizeof(webpage) -1);
             close(connfd);
@@ -99,8 +96,6 @@ int main(int argc, char *argv[])
         }
         close(connfd);
     }
-
-	//closeConnection();
 
 	return 0;
 }
