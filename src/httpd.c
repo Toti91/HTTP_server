@@ -123,7 +123,6 @@ void sendWebPage(GString* payload) {
 	g_string_append(webPage, header->str);
 	g_string_append(webPage, html->str);
 
-	printf("%s\n", webPage->str);
 	// Send the page to the client connection.
 	send(connfd, webPage->str, webPage->len, 0);
 
@@ -137,14 +136,15 @@ void sendWebPage(GString* payload) {
 void handleRequest(GString* payload) {
 	if(g_str_has_prefix(payload->str, "GET")) { // GET request
 		sendWebPage(payload);
+		printf("GET..");
 	}
-	else if(g_str_has_prefix(payload->str, "HEAD")) {
-		// Call handleHeader with second parameter as TRUE to send only the header.
+	else if(g_str_has_prefix(payload->str, "HEAD")) { // HEAD request
 		handleHeader(payload, TRUE, 0);
+		printf("HEAD..");
 	}
 	else if(g_str_has_prefix(payload->str, "POST")) { // POST request
 		// Do stuff
-		printf("POST");
+		printf("POST..");
 	}
 }
 
