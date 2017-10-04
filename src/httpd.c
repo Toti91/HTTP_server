@@ -8,21 +8,25 @@
 #include <glib.h>
 #include <arpa/inet.h>
 #include <time.h>
+#include <stdbool.h>
 
 int sockfd, connfd;
 struct sockaddr_in server, client;
 
 void logInfo() {
 	GString* logStr;
+
+	// Retrieve client port.
 	char portStr[sizeof(ntohs(client.sin_port))];
 	sprintf(portStr, "%d", ntohs(client.sin_port));
-	time_t timeStamp = time(NULL);
 
-	char formattedTime[] = "1991-12-11T00:00:00+TZ";
+	// ISO 8601 datetime
+	time_t timeStamp = time(NULL);
+	char formattedTime[] = "1991-12-11T00:00:00+TZ"; // My birthday!
 	struct tm* thisTime = gmtime(&timeStamp);
 	strftime(formattedTime, sizeof(formattedTime), "%FT%T%Z", thisTime);
 
-
+	// Construct the log string.
 	logStr = g_string_new(" : ");
 	g_string_prepend(logStr, formattedTime);
 	g_string_append(logStr, inet_ntoa(client.sin_addr));
@@ -30,11 +34,53 @@ void logInfo() {
 	g_string_append(logStr, portStr);
 	g_string_append(logStr, "\n");
 
+	// Write to log file.
 	FILE *logFile = fopen("../log.txt", "a");
 	fputs(logStr->str, logFile);
 	fclose(logFile);
 
 	g_string_free(logStr, TRUE);
+}
+
+GString* handleHeader(GString* payload, bool headRequest, gsize contentLen) {
+	// Copy payload into a fresh GString.
+	GString* pl = g_string_sized_new(payload->allocated_len);
+	g_string_assign(pl, payload->str);
+
+	// Split payload on newlines.
+	gchar** lines = g_strsplit(pl->str, "\r\n", 0);
+	
+	// Construct a basic header string.
+	GString* head = g_string_new("HTTP/1.1 200 OK\n");
+	g_string_append(head, "Content-Type: text/html\n");
+
+	// If this call is not a HEAD request, we want to add the Content-Length header.
+	if(!headRequest) {
+		// The Content-Length STRING shouldn't need more than 4 bytes.
+		char contSize[4];
+		sprintf(contSize, "%zd", contentLen);
+		GString* lenStr = g_string_new("\n");
+		g_string_prepend(lenStr, contSize);
+
+		g_string_append(head, "Content-length: ");
+		g_string_append(head, lenStr->str);
+		g_string_free(lenStr, TRUE);
+	}
+
+	// Strip lines of whitespaces and add them to the header string.
+	for(unsigned int i = 0; i < g_strv_length(lines); i++) {
+		g_strstrip(lines[i]);
+		g_string_append_printf(head, "%s\n", lines[i]);
+	}
+
+	// If this call is a HEAD request, then just send the header to the client connection.
+	if(headRequest) {
+		send(connfd, head->str, head->len, 0);
+		g_string_free(head, TRUE);
+		g_string_free(pl, TRUE);
+	}
+
+	return head;
 }
 
 void sendWebPage(GString* payload) {
@@ -49,53 +95,54 @@ void sendWebPage(GString* payload) {
 	gchar* page = firstLine[1];
 	gchar* host = secondLine[1];
 
+	// Create a new string that will hold basic HTML page.
 	GString* html = g_string_new("<!DOCTYPE html>\n<html><head><title>Test</title></head><body>");
+
+	// Retrieve client port.
 	char cliPort[sizeof(ntohs(client.sin_port))];
 	sprintf(cliPort, "%d", ntohs(client.sin_port));
 
+	// Construct a string that contains the host url.
 	GString* hostUrl = g_string_new(host);
 	g_string_append(hostUrl, page);
 	g_strchug(hostUrl->str);
 	g_string_prepend(hostUrl, "http://");
 
+	// Insert host url and client information into HTML.
 	g_string_append(html, hostUrl->str);
 	g_string_append(html, " ");
 	g_string_append(html, inet_ntoa(client.sin_addr));
 	g_string_append(html, ":");
 	g_string_append(html, cliPort);
 	g_string_append(html, "</body></html>");
-
 	g_string_free(hostUrl, TRUE);
 
-	char contSize[3];
-	sprintf(contSize, "%zd", html->len);
-
-	GString* contentLen = g_string_new("\n");
-	g_string_prepend(contentLen, contSize);
-
-	GString* webPage = g_string_new("HTTP/1.1 200 OK\n");
-	g_string_append(webPage, "Content-length: ");
-	g_string_append(webPage, contentLen->str);
-	g_string_append(webPage, "Content-Type: text/html\n\n");
+	// Construct a string with header and html page.
+	GString* header = handleHeader(payload, FALSE, html->len);
+	GString* webPage = g_string_sized_new(header->allocated_len);
+	g_string_append(webPage, header->str);
 	g_string_append(webPage, html->str);
 
+	printf("%s\n", webPage->str);
+	// Send the page to the client connection.
 	send(connfd, webPage->str, webPage->len, 0);
 
 	// Free memory
-	g_string_free(contentLen, TRUE);
+	g_string_free(header, TRUE);
 	g_string_free(html, TRUE);
 	g_string_free(webPage, TRUE);
 }
 
-void handleRequest(GString* pl) {
-	if(g_str_has_prefix(pl->str, "GET")) { // GET request
-		sendWebPage(pl);
+
+void handleRequest(GString* payload) {
+	if(g_str_has_prefix(payload->str, "GET")) { // GET request
+		sendWebPage(payload);
 	}
-	else if(g_str_has_prefix(pl->str, "HEAD")) { // HEAD request
-		// Do stuff
-		printf("HEAD");
+	else if(g_str_has_prefix(payload->str, "HEAD")) {
+		// Call handleHeader with second parameter as TRUE to send only the header.
+		handleHeader(payload, TRUE, 0);
 	}
-	else if(g_str_has_prefix(pl->str, "POST")) { // POST request
+	else if(g_str_has_prefix(payload->str, "POST")) { // POST request
 		// Do stuff
 		printf("POST");
 	}
@@ -112,6 +159,7 @@ int main(int argc, char *argv[])
 	char buff[2048];
 	socklen_t cliLen = sizeof(client);
 
+	// Set up socket
 	sockfd = socket(AF_INET, SOCK_STREAM, 0);
 	memset(&server, 0, sizeof(server));
 	server.sin_family = AF_INET;
@@ -121,13 +169,13 @@ int main(int argc, char *argv[])
 	int optionStatus = setsockopt(sockfd, SOL_SOCKET, SO_REUSEADDR, &(int){1}, sizeof(int));
 
 	if(optionStatus < 0) {
-		perror("setting socket options failed");
+		perror("Setting socket options failed");
 	}
 
 	int bindStatus = bind(sockfd, (struct sockaddr *) &server, (socklen_t) sizeof(server));
 
 	if(bindStatus < 0) {
-		perror("socket binding failed.");
+		perror("Socket binding failed.");
 		return EXIT_FAILURE;
 	}
 
@@ -136,6 +184,7 @@ int main(int argc, char *argv[])
 
 	while(1)
 	{
+		// Accept incoming client connection.
 		connfd = accept(sockfd, (struct sockaddr *) &client, &cliLen);
 
 		if(connfd == -1) {
@@ -149,7 +198,6 @@ int main(int argc, char *argv[])
 
 		memset(buff, 0, 2048);
 		read(connfd, buff, 2047);
-		//printf("%s\n", buff);
 
 		GString* payload = g_string_new(buff);
 		handleRequest(payload);
