@@ -55,8 +55,10 @@ GString* handleHeader(GString* payload, bool headRequest, gsize contentLen) {
 	g_string_append(head, "Content-Type: text/html\n");
 
 	// If this call is not a HEAD request, we want to add the Content-Length header.
+	// Content-Length is a payload field which means we dont need to send it in a HEAD request.
+	// RFC 7231 (Section 3.3)
 	if(!headRequest) {
-		// The Content-Length STRING shouldn't need more than 4 bytes.
+		// The Content-Length STRING shouldn't need more than 4 bytes. (max 9999 ?)
 		char contSize[4];
 		sprintf(contSize, "%zd", contentLen);
 		GString* lenStr = g_string_new("\n");
@@ -143,7 +145,7 @@ void handleRequest(GString* payload) {
 		printf("HEAD..");
 	}
 	else if(g_str_has_prefix(payload->str, "POST")) { // POST request
-		// Do stuff
+		// TODO: do stuff here
 		printf("POST..");
 	}
 }
