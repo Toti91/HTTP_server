@@ -52,13 +52,11 @@ void sendWebPage(GString* payload) {
 	GString* html = g_string_new("<!DOCTYPE html>\n<html><head><title>Test</title></head><body>");
 	char cliPort[sizeof(ntohs(client.sin_port))];
 	sprintf(cliPort, "%d", ntohs(client.sin_port));
-	//sprintf(servPort, "%d", ntohs(server.sin_port));
 
 	GString* hostUrl = g_string_new(host);
 	g_string_append(hostUrl, page);
 	g_strchug(hostUrl->str);
 	g_string_prepend(hostUrl, "http://");
-
 
 	g_string_append(html, hostUrl->str);
 	g_string_append(html, " ");
@@ -137,29 +135,29 @@ int main(int argc, char *argv[])
 	listen(sockfd, 1);
 
 	while(1)
-    {
+	{
 		connfd = accept(sockfd, (struct sockaddr *) &client, &cliLen);
 
-        if(connfd == -1) {
-            perror("Accepting connection failed..\n");
-            close(sockfd);
-            continue;
-        }
+		if(connfd == -1) {
+			perror("Accepting connection failed..\n");
+			close(sockfd);
+			continue;
+		}
 
 		printf("Got client connection..\n");
 		logInfo();
 
-        memset(buff, 0, 2048);
-        read(connfd, buff, 2047);
+		memset(buff, 0, 2048);
+		read(connfd, buff, 2047);
 		//printf("%s\n", buff);
 
 		GString* payload = g_string_new(buff);
 		handleRequest(payload);
 
-        printf("Done! Closing connection..\n\n");
+		printf("Done! Closing connection..\n\n");
 		close(connfd);
 		g_string_free(payload, TRUE);
-    }
+	}
 
 	return 0;
 }
