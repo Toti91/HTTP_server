@@ -9,6 +9,7 @@
 #include <arpa/inet.h>
 #include <time.h>
 #include <stdbool.h>
+#include <unistd.h>
 
 int sockfd, connfd;
 struct sockaddr_in server, client;
@@ -51,13 +52,20 @@ GString* handleHeader(GString* payload, bool headRequest, gsize contentLen) {
 	gchar** lines = g_strsplit(pl->str, "\r\n", 0);
 	
 	// Construct a basic header string.
-	GString* head = g_string_new("HTTP/1.1 200 OK\n");
-	g_string_append(head, "Content-Type: text/html\n");
+	GString* head = g_string_sized_new(pl->allocated_len);
 
-	// If this call is not a HEAD request, we want to add the Content-Length header.
+	if(g_str_has_prefix(pl->str, "POST")) {
+		g_string_assign(head, "HTTP/1.1 201 CREATED\n");
+	}
+	else {
+		g_string_assign(head, "HTTP/1.1 200 OK\n");
+		g_string_append(head, "Content-Type: text/html\n");
+	}
+
+	// If this call is a GET request, we want to add the Content-Length header.
 	// Content-Length is a payload field which means we dont need to send it in a HEAD request.
 	// RFC 7231 (Section 3.3)
-	if(!headRequest) {
+	if(g_str_has_prefix(pl->str, "GET")) {
 		// The Content-Length STRING shouldn't need more than 4 bytes. (max 9999 ?)
 		char contSize[4];
 		sprintf(contSize, "%zd", contentLen);
@@ -85,7 +93,7 @@ GString* handleHeader(GString* payload, bool headRequest, gsize contentLen) {
 	return head;
 }
 
-void sendWebPage(GString* payload) {
+void handleGetRequest(GString* payload) {
 	// Create a new GString to copy payload into.
 	GString* pl = g_string_sized_new(payload->allocated_len);
 	g_string_assign(pl, payload->str);
@@ -121,32 +129,55 @@ void sendWebPage(GString* payload) {
 
 	// Construct a string with header and html page.
 	GString* header = handleHeader(payload, FALSE, html->len);
-	GString* webPage = g_string_sized_new(header->allocated_len);
-	g_string_append(webPage, header->str);
-	g_string_append(webPage, html->str);
+	GString* response = g_string_sized_new(header->allocated_len);
+	g_string_append(response, header->str);
+	g_string_append(response, html->str);
 
 	// Send the page to the client connection.
-	send(connfd, webPage->str, webPage->len, 0);
+	send(connfd, response->str, response->len, 0);
 
 	// Free memory
 	g_string_free(header, TRUE);
 	g_string_free(html, TRUE);
-	g_string_free(webPage, TRUE);
+	g_string_free(response, TRUE);
+}
+
+void handlePostRequest(GString* payload) {
+	GString* pl = g_string_sized_new(payload->allocated_len);
+	g_string_assign(pl, payload->str);
+
+	GString* response = handleHeader(pl, FALSE, pl->len);
+	g_string_free(pl, TRUE);
+
+	//printf("%s\n", response->str);
+	send(connfd, response->str, response->len, 0);
+	g_string_free(response, TRUE);
 }
 
 
-void handleRequest(GString* payload) {
+bool handleRequest(GString* payload) {
 	if(g_str_has_prefix(payload->str, "GET")) { // GET request
-		sendWebPage(payload);
-		printf("GET..");
+		handleGetRequest(payload);
+		printf("GET..\n");
+
+		return true;
 	}
 	else if(g_str_has_prefix(payload->str, "HEAD")) { // HEAD request
 		handleHeader(payload, TRUE, 0);
-		printf("HEAD..");
+		printf("HEAD..\n");
+
+		return true;
 	}
 	else if(g_str_has_prefix(payload->str, "POST")) { // POST request
-		// TODO: do stuff here
-		printf("POST..");
+		handlePostRequest(payload);
+		printf("POST..\n");
+
+		return true;
+	}
+	else {
+		perror("Invalid request, closing connection..\n");
+
+		return false;
 	}
 }
 
@@ -202,9 +233,11 @@ int main(int argc, char *argv[])
 		read(connfd, buff, 2047);
 
 		GString* payload = g_string_new(buff);
-		handleRequest(payload);
 
-		printf("Done! Closing connection..\n\n");
+		if(handleRequest(payload)) {
+			printf("Done! Closing connection..\n\n");
+		}
+
 		close(connfd);
 		g_string_free(payload, TRUE);
 	}
