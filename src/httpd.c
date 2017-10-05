@@ -14,8 +14,28 @@
 int sockfd, connfd;
 struct sockaddr_in server, client;
 
-void logInfo() {
+void logInfo(GString* payload, gchar* method) {
 	GString* logStr;
+	GString* pl = g_string_sized_new(payload->allocated_len);
+	g_string_assign(pl, payload->str);
+
+	gchar* statusCode;
+	gchar* host;
+
+	if(g_strcmp0(method, "POST") == 0) {
+		statusCode = "201";
+	}
+	else if(g_strcmp0(method, "INVALID") == 0) {
+		statusCode = "400";
+	}
+	else {
+		statusCode = "200";
+	}
+
+	gchar** lines = g_strsplit(pl->str, "\r\n", 0);
+	gchar** secondLine = g_strsplit(lines[1], " ", 0);
+
+	host = secondLine[1];
 
 	// Retrieve client port.
 	char portStr[sizeof(ntohs(client.sin_port))];
@@ -33,6 +53,12 @@ void logInfo() {
 	g_string_append(logStr, inet_ntoa(client.sin_addr));
 	g_string_append(logStr, ":");
 	g_string_append(logStr, portStr);
+	g_string_append(logStr, " ");
+	g_string_append(logStr, method);
+	g_string_append(logStr, " ");
+	g_string_append(logStr, host);
+	g_string_append(logStr, " : ");
+	g_string_append(logStr, statusCode);
 	g_string_append(logStr, "\n");
 
 	// Write to log file.
@@ -158,23 +184,27 @@ void handlePostRequest(GString* payload) {
 bool handleRequest(GString* payload) {
 	if(g_str_has_prefix(payload->str, "GET")) { // GET request
 		handleGetRequest(payload);
+		logInfo(payload, "GET");
 		printf("GET..\n");
 
 		return true;
 	}
 	else if(g_str_has_prefix(payload->str, "HEAD")) { // HEAD request
 		handleHeader(payload, TRUE, 0);
+		logInfo(payload, "HEAD");
 		printf("HEAD..\n");
 
 		return true;
 	}
 	else if(g_str_has_prefix(payload->str, "POST")) { // POST request
 		handlePostRequest(payload);
+		logInfo(payload, "POST");
 		printf("POST..\n");
 
 		return true;
 	}
 	else {
+		logInfo(payload, "INVALID");
 		perror("Invalid request, closing connection..\n");
 
 		return false;
@@ -227,11 +257,10 @@ int main(int argc, char *argv[])
 		}
 
 		printf("Got client connection..\n");
-		logInfo();
-
+		
 		memset(buff, 0, 2048);
 		read(connfd, buff, 2047);
-
+		
 		GString* payload = g_string_new(buff);
 
 		if(handleRequest(payload)) {
