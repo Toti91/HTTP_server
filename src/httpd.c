@@ -18,6 +18,7 @@ typedef struct clientRequest {
 	gchar* page;
 	gchar* hostInfo;
 	gchar* httpVersion;
+	GString* requestBody;
 } clientRequest;
 
 int sockfd;
@@ -110,28 +111,33 @@ GString* handleHeader(GString* payload, clientRequest* cr, gsize contentLen) {
 	return head;
 }
 
-void handleGetRequest(GString* payload, clientRequest* cr) {
-	// Create a new string that will hold basic HTML page.
-	GString* html = g_string_new("<!DOCTYPE html>\n<html><head><meta charset=\"utf-8\"><title>Test</title></head><body>");
-
-	// Retrieve client port.
-	char cliPort[sizeof(ntohs(client.sin_port))];
-	sprintf(cliPort, "%d", ntohs(client.sin_port));
-
-	// Construct a string that contains the host url.
+GString* constructHtml(clientRequest* cr) {
 	GString* hostUrl = g_string_new(cr->hostInfo);
 	g_string_append(hostUrl, cr->page);
 	g_strchug(hostUrl->str);
 	g_string_prepend(hostUrl, "http://");
 
+	char cliPort[sizeof(ntohs(client.sin_port))];
+	sprintf(cliPort, "%d", ntohs(client.sin_port));
+
 	// Insert host url and client information into HTML.
-	g_string_append(html, hostUrl->str);
-	g_string_append(html, " ");
-	g_string_append(html, inet_ntoa(client.sin_addr));
-	g_string_append(html, ":");
-	g_string_append(html, cliPort);
-	g_string_append(html, "</body></html>");
+	GString* ret = g_string_new("");
+	g_string_append(ret, hostUrl->str);
+	g_string_append(ret, " ");
+	g_string_append(ret, inet_ntoa(client.sin_addr));
+	g_string_append(ret, ":");
+	g_string_append(ret, cliPort);
 	g_string_free(hostUrl, TRUE);
+
+	return ret;
+}
+
+void handleGetRequest(GString* payload, clientRequest* cr) {
+	// Create a new string that will hold basic HTML page.
+	GString* html = g_string_new("<!DOCTYPE html>\n<html><head><meta charset=\"utf-8\"><title>Test</title></head><body>");
+
+	g_string_append(html, constructHtml(cr)->str);
+	g_string_append(html, "</body></html>");
 
 	// Construct a response string with header and html page.
 	GString* header = handleHeader(payload, cr, html->len);
@@ -149,8 +155,16 @@ void handleGetRequest(GString* payload, clientRequest* cr) {
 }
 
 void handlePostRequest(GString* payload, clientRequest* cr) {
-	// Get correct header.
-	GString* response = handleHeader(payload, cr, payload->len);
+	// This is the correct content-length.
+	gsize contentLen = (constructHtml(cr)->len + cr->requestBody->len);
+	
+	GString* pl = handleHeader(payload, cr, contentLen);
+	gchar** split = g_strsplit(pl->str, "\n\n", 0);
+
+	GString* response = g_string_new(split[0]);
+	g_string_append(response, "\n\n");
+	g_string_append(response, constructHtml(cr)->str);
+	g_string_append(response, cr->requestBody->str);
 
 	// Send response.
 	send(cr->connfd, response->str, response->len, 0);
@@ -211,8 +225,9 @@ clientRequest* newClientRequest(int cfd, GString* payload) {
 	cr->page = firstLine[1];
 	cr->hostInfo = secondLine[1];
 	cr->httpVersion = firstLine[2];
+	cr->requestBody = g_string_new(strstr(payload->str, "\r\n\r\n"));
 
-	// Set the correct HTTP stats code corresponding to method.
+	// Set the correct HTTP status code corresponding to method.
 	if(g_strcmp0(cr->method, "POST") == 0) {
 		cr->statusCode = "201";
 	}
@@ -222,6 +237,8 @@ clientRequest* newClientRequest(int cfd, GString* payload) {
 	else {
 		cr->statusCode = "501";
 	}
+
+	g_string_free(pl, TRUE);
 
 	return cr;
 }
