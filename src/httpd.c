@@ -132,7 +132,7 @@ GString* constructHtml(clientRequest* cr) {
 	return ret;
 }
 
-void handleGetRequest(GString* payload, clientRequest* cr) {
+void sendGetResponse(GString* payload, clientRequest* cr) {
 	// Create a new string that will hold basic HTML page.
 	GString* html = g_string_new("<!DOCTYPE html>\n<html><head><meta charset=\"utf-8\"><title>Test</title></head><body>");
 
@@ -154,10 +154,10 @@ void handleGetRequest(GString* payload, clientRequest* cr) {
 	g_string_free(response, TRUE);
 }
 
-void handlePostRequest(GString* payload, clientRequest* cr) {
+void sendPostResponse(GString* payload, clientRequest* cr) {
 	// This is the correct content-length.
 	gsize contentLen = (constructHtml(cr)->len + cr->requestBody->len);
-	
+
 	GString* pl = handleHeader(payload, cr, contentLen);
 	gchar** split = g_strsplit(pl->str, "\n\n", 0);
 
@@ -171,7 +171,7 @@ void handlePostRequest(GString* payload, clientRequest* cr) {
 	g_string_free(response, TRUE);
 }
 
-void handleInvalid(clientRequest* cr) {
+void sendInvalidResponse(clientRequest* cr) {
 	// If the request is not GET, POST or HEAD, then send Not implemented..
 	GString* response = g_string_new(cr->httpVersion);
 	g_string_append(response, " 501 Not implemented\n\n");
@@ -182,7 +182,7 @@ void handleInvalid(clientRequest* cr) {
 
 bool handleRequest(GString* payload, clientRequest* cr) {
 	if(g_strcmp0(cr->method, "GET") == 0) { // GET request
-		handleGetRequest(payload, cr);
+		sendGetResponse(payload, cr);
 		printf("GET..\n");
 
 		return true;
@@ -194,13 +194,13 @@ bool handleRequest(GString* payload, clientRequest* cr) {
 		return true;
 	}
 	else if(g_strcmp0(cr->method, "POST") == 0) { // POST request
-		handlePostRequest(payload, cr);
+		sendPostResponse(payload, cr);
 		printf("POST..\n");
 
 		return true;
 	}
 	else { // INVALID request
-		handleInvalid(cr);
+		sendInvalidResponse(cr);
 		printf("Invalid request: %s\n", cr->method);
 		printf("Closing connection..\n\n");
 
