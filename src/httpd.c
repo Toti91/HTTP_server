@@ -219,7 +219,7 @@ bool handleRequest(GString* payload) {
 	else { // INVALID request
 		handleInvalid();
 		logInfo(payload, "INVALID");
-		printf("Invalid request, closing connection..\n");
+		printf("Invalid request, closing connection..\n\n");
 
 		return false;
 	}
