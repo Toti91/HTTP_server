@@ -27,7 +27,7 @@ void logInfo(GString* payload, gchar* method) {
 		statusCode = "201";
 	}
 	else if(g_strcmp0(method, "INVALID") == 0) {
-		statusCode = "400";
+		statusCode = "501";
 	}
 	else {
 		statusCode = "200";
@@ -69,6 +69,8 @@ void logInfo(GString* payload, gchar* method) {
 	fclose(logFile);
 
 	g_string_free(logStr, TRUE);
+	g_strfreev(lines);
+	g_strfreev(secondLine);
 }
 
 GString* handleHeader(GString* payload, bool headRequest, gsize contentLen) {
@@ -184,6 +186,13 @@ void handlePostRequest(GString* payload) {
 	g_string_free(response, TRUE);
 }
 
+void handleInvalid() {
+	// If the request is not GET, POST or HEAD, then send Not implemented..
+	GString* response = g_string_new("HTTP/1.1 501 Not implemented\n\n");
+
+	send(connfd, response->str, response->len, 0);
+	g_string_free(response, TRUE);
+}
 
 bool handleRequest(GString* payload) {
 	if(g_str_has_prefix(payload->str, "GET")) { // GET request
@@ -207,9 +216,10 @@ bool handleRequest(GString* payload) {
 
 		return true;
 	}
-	else {
+	else { // INVALID request
+		handleInvalid();
 		logInfo(payload, "INVALID");
-		perror("Invalid request, closing connection..\n");
+		printf("Invalid request, closing connection..\n");
 
 		return false;
 	}
