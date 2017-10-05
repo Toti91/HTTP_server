@@ -22,6 +22,7 @@ void logInfo(GString* payload, gchar* method) {
 	gchar* statusCode;
 	gchar* host;
 
+	// Send correct status code corresponding to request method.. TODO: this is bad code
 	if(g_strcmp0(method, "POST") == 0) {
 		statusCode = "201";
 	}
@@ -32,6 +33,7 @@ void logInfo(GString* payload, gchar* method) {
 		statusCode = "200";
 	}
 
+	// Split payload into lines and extract host from second line.
 	gchar** lines = g_strsplit(pl->str, "\r\n", 0);
 	gchar** secondLine = g_strsplit(lines[1], " ", 0);
 
@@ -169,13 +171,15 @@ void handleGetRequest(GString* payload) {
 }
 
 void handlePostRequest(GString* payload) {
+	// Copy payload into fresh GString
 	GString* pl = g_string_sized_new(payload->allocated_len);
 	g_string_assign(pl, payload->str);
 
+	// Get correct header.
 	GString* response = handleHeader(pl, FALSE, pl->len);
 	g_string_free(pl, TRUE);
 
-	//printf("%s\n", response->str);
+	// Send response.
 	send(connfd, response->str, response->len, 0);
 	g_string_free(response, TRUE);
 }
