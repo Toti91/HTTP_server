@@ -1,5 +1,6 @@
 #include <sys/socket.h>
 #include <sys/types.h>
+#include <sys/poll.h>
 #include <stdlib.h>
 #include <netinet/in.h>
 #include <stdio.h>
@@ -10,6 +11,9 @@
 #include <time.h>
 #include <stdbool.h>
 #include <unistd.h>
+#include <sys/ioctl.h>
+#include <fcntl.h>
+#include <errno.h>
 
 typedef struct clientRequest {
 	int connfd;
@@ -18,11 +22,10 @@ typedef struct clientRequest {
 	gchar* page;
 	gchar* hostInfo;
 	gchar* httpVersion;
+	gchar* ipAddr;
 	gchar* port;
 	GString* requestBody;
 } clientRequest;
-
-struct sockaddr_in server, client;
 
 void logInfo(clientRequest* cr) {
 	GString* logStr;
@@ -36,7 +39,7 @@ void logInfo(clientRequest* cr) {
 	// Construct the log string.
 	logStr = g_string_new(" : ");
 	g_string_prepend(logStr, formattedTime);
-	g_string_append(logStr, inet_ntoa(client.sin_addr));
+	g_string_append(logStr, cr->ipAddr);
 	g_string_append(logStr, ":");
 	g_string_append(logStr, cr->port);
 	g_string_append(logStr, " ");
@@ -66,10 +69,14 @@ GString* handleHeader(GString* payload, clientRequest* cr, gsize contentLen) {
 		g_string_assign(head, cr->httpVersion);
 		g_string_append(head, " 201 CREATED\n");
 	}
-	else {
+	else if(g_str_has_prefix(pl->str, "GET") || g_str_has_prefix(pl->str, "HEAD")){
 		g_string_assign(head, cr->httpVersion);
 		g_string_append(head, " 200 OK\n");
 		g_string_append(head, "Content-Type: text/html\n");
+	}
+	else {
+		g_string_assign(head, cr->httpVersion);
+		g_string_append(head, " 501 Not implemented\n");
 	}
 
 	// If this call is a GET request, we want to add the Content-Length header.
@@ -126,7 +133,7 @@ GString* constructHtml(clientRequest* cr) {
 	GString* ret = g_string_new("<!DOCTYPE html>\n<html><head><meta charset=\"utf-8\"><title>Test</title></head><body>");
 	g_string_append(ret, hostUrl->str);
 	g_string_append(ret, " ");
-	g_string_append(ret, inet_ntoa(client.sin_addr));
+	g_string_append(ret, cr->ipAddr);
 	g_string_append(ret, ":");
 	g_string_append(ret, cr->port);
 	g_string_append(ret, cr->requestBody->str);
@@ -176,45 +183,35 @@ void sendPostResponse(GString* payload, clientRequest* cr) {
 	g_string_free(response, TRUE);
 }
 
-void sendInvalidResponse(clientRequest* cr) {
+void sendInvalidResponse(GString* payload, clientRequest* cr) {
 	// If the request is not GET, POST or HEAD, then send Not implemented..
-	GString* response = g_string_new(cr->httpVersion);
-	g_string_append(response, " 501 Not implemented\n\n");
+	GString* response = handleHeader(payload, cr, 0);
 
 	send(cr->connfd, response->str, response->len, 0);
 	g_string_free(response, TRUE);
 }
 
-bool handleRequest(GString* payload, clientRequest* cr) {
+void handleRequest(GString* payload, clientRequest* cr) {
 	if(g_strcmp0(cr->method, "GET") == 0) { // GET request
 		sendGetResponse(payload, cr);
 		printf("GET..\n");
-
-		return true;
 	}
 	else if(g_strcmp0(cr->method, "HEAD") == 0) { // HEAD request
 		handleHeader(payload, cr, 0);
 		printf("HEAD..\n");
-
-		return true;
 	}
 	else if(g_strcmp0(cr->method, "POST") == 0) { // POST request
 		sendPostResponse(payload, cr);
 		printf("POST..\n");
-
-		return true;
 	}
 	else { // INVALID request
-		sendInvalidResponse(cr);
+		sendInvalidResponse(payload, cr);
 		printf("Invalid request: %s\n", cr->method);
-		printf("Closing connection..\n\n");
-
-		return false;
 	}
 }
 
 // Creates a new client request that holds information like the request method etc.
-clientRequest* newClientRequest(int cfd, GString* payload) {
+clientRequest* newClientRequest(int cfd, GString* payload, struct sockaddr_in* sock) {
 	// Copy payload into fresh GString
 	GString* pl = g_string_sized_new(payload->allocated_len);
 	g_string_assign(pl, payload->str);
@@ -226,14 +223,15 @@ clientRequest* newClientRequest(int cfd, GString* payload) {
 	gchar** secondLine = g_strsplit(lines[1], " ", 0);
 
 	// Retrieve the client port from socket.
-	char portStr[sizeof(ntohs(client.sin_port))];
-	sprintf(portStr, "%d", ntohs(client.sin_port));
+	char portStr[sizeof(ntohs(sock->sin_port))];
+	sprintf(portStr, "%d", ntohs(sock->sin_port));
 
 	cr->connfd = cfd;
 	cr->method = g_strstrip(firstLine[0]);
 	cr->page = firstLine[1];
 	cr->hostInfo = secondLine[1];
 	cr->httpVersion = firstLine[2];
+	cr->ipAddr = inet_ntoa(sock->sin_addr);
 	cr->port = portStr;
 	cr->requestBody = g_string_new(strstr(payload->str, "\r\n\r\n"));
 
@@ -256,8 +254,7 @@ clientRequest* newClientRequest(int cfd, GString* payload) {
 	return cr;
 }
 
-/*void destroyClientRequest(clientRequest* cr) {
-	close(cr->connfd);
+void destroyClientRequest(clientRequest* cr) {
 	g_free(cr->method);
 	g_free(cr->statusCode);
 	g_free(cr->page);
@@ -265,8 +262,7 @@ clientRequest* newClientRequest(int cfd, GString* payload) {
 	g_free(cr->httpVersion);
 	g_free(cr->port);
 	g_string_free(cr->requestBody, TRUE);
-	g_free(cr);
-}*/
+}
 
 int main(int argc, char *argv[])
 {
@@ -275,10 +271,16 @@ int main(int argc, char *argv[])
 		exit(1);
 	}
 
-	int sockfd, status;
+	int sockfd, status, timeout, k, opt=1, fdSize=1, connfd=-1;
+	struct sockaddr_in server, client;
+	struct pollfd fds[100];
 	int myPort = atoi(argv[1]);
 	char buff[2048];
 	socklen_t cliLen = sizeof(client);
+	bool closeConnection = FALSE;
+	clientRequest* cr;
+
+	timeout = (10 * 1000); // 30 second timeout
 
 	// Set up socket
 	sockfd = socket(AF_INET, SOCK_STREAM, 0);
@@ -287,7 +289,7 @@ int main(int argc, char *argv[])
 	server.sin_addr.s_addr = htonl(INADDR_ANY);
 	server.sin_port = htons(myPort);
 
-	status = setsockopt(sockfd, SOL_SOCKET, SO_REUSEADDR, &(int){1}, sizeof(int));
+	status = setsockopt(sockfd, SOL_SOCKET, SO_REUSEADDR, (char *)&opt, sizeof(opt));
 
 	if(status < 0) {
 		perror("Setting socket options failed");
@@ -295,13 +297,13 @@ int main(int argc, char *argv[])
 		return EXIT_FAILURE;
 	}
 
-	/*status = ioctl(sockfd, FIONBIO, &(int){1});
+	status = ioctl(sockfd, FIONBIO, (char *)&opt);
 
 	if(status < 0) {
-		perror("setsockopt() failed");
+		perror("ioctl() failed");
 		close(sockfd);
 		return EXIT_FAILURE;
-	}*/
+	}
 
 	status = bind(sockfd, (struct sockaddr *) &server, (socklen_t) sizeof(server));
 
@@ -311,36 +313,112 @@ int main(int argc, char *argv[])
 	}
 
 	printf("Listening on port %d \n\n", myPort);
-	listen(sockfd, 1);
+	listen(sockfd, 32);
 
-	while(1)
-	{
-		// Accept incoming client connection.
-		int connfd = accept(sockfd, (struct sockaddr *) &client, &cliLen);
+	memset(fds, 0, sizeof(fds));
 
-		if(connfd == -1) {
-			perror("Accepting connection failed..\n");
-			close(sockfd);
+	// Initialize array of file descriptors with socket fd.
+	fds[0].fd = sockfd;
+	fds[0].events = POLLIN;
+
+
+	// POLLING: We received help with consideration to this tutorial: 
+	// https://www.ibm.com/support/knowledgecenter/ssw_ibm_i_71/rzab6/poll.htm
+	while(1) {	
+		status = poll(fds, fdSize, timeout);
+
+		if(status < 0) {
+			perror("poll() failed");
+			return EXIT_FAILURE;
+		}
+
+		if(status == 0) {
+			// If poll status is 0 then connection timed out. 
+			printf("Connection timed out..\n");
 			continue;
 		}
 
-		printf("Got client connection..\n");
-		
-		memset(buff, 0, 2048);
-		read(connfd, buff, 2047);
-		
-		GString* payload = g_string_new(buff);
-		clientRequest* cr = newClientRequest(connfd, payload);
-		logInfo(cr);
+		for(int i = 0; i < fdSize; i++) {
+	
+			if(fds[i].revents == 0) {
+				continue;
+			}
 
-		if(handleRequest(payload, cr)) {
-			printf("Done! Closing connection..\n\n");
+			if(fds[i].fd == sockfd) {
+				// Accept incoming connections and add their file descriptors to array.
+				do {
+					connfd = accept(sockfd, (struct sockaddr *) &client, &cliLen);
+
+					if(connfd < 0) {
+						if(errno != EWOULDBLOCK) {
+							perror("accept() failed");
+							return EXIT_FAILURE;
+						}
+						break;
+					}
+
+					fds[fdSize].fd = connfd;
+					fds[fdSize].events = POLLIN;
+					fdSize++;
+				} while(connfd != -1);
+			}
+			else {
+				while(TRUE) {
+					// Read data from client connection into buffer.
+					memset(buff, 0, 2048);
+					status = read(fds[i].fd, buff, 2047);
+
+					if(status < 0) {
+						if(errno != EWOULDBLOCK) {
+							perror("recv() failed");
+							closeConnection = TRUE;
+						}
+						break;
+					}
+
+					if(status == 0) {
+						printf("Connection closed..\n");
+						closeConnection = TRUE;
+						break;
+					}
+
+					// Create a payload from buffer and initialize a new client request.
+					GString* payload = g_string_new(buff);
+					cr = newClientRequest(fds[i].fd, payload, &client);
+					logInfo(cr);
+					handleRequest(payload, cr);
+				}
+
+				if(closeConnection) {
+					// Close the connection and shrink the FD-array.
+					close(fds[i].fd);
+					fds[i].fd = -1;
+
+					for (k = 0; k < fdSize; k++)
+					{
+					  if (fds[k].fd == -1)
+					  {
+						for(int j = k; j < fdSize; j++)
+						{
+						  fds[j].fd = fds[j+1].fd;
+						}
+						k--;
+						fdSize--;
+					  }
+					}
+				}
+			}
 		}
-
-		close(connfd);
-		//destroyClientRequest(cr);
-		g_string_free(payload, TRUE);
 	}
+
+	// Clean up connections.
+	for(int i = 0; i < fdSize; i++) {
+		if(fds[i].fd >= 0) {
+			close(fds[i].fd);
+		}
+	}
+
+	//destroyClientRequest(cr);
 
 	return 0;
 }
