@@ -1,1 +1,13 @@
 This is a HTTP server written in C using UNIX sockets.
+The server supports GET, POST and HEAD requests.
+
+When the server receives a request it checks the header for method and handles the request corresponding to that method.
+
+GET: 
+     The server constructs a HTML page in-memory and serves it to the client.
+
+POST: 
+     The server constructs a HTML page in-memory, extracts the data from the body of the requests and injects it into the html, page.
+
+HEAD: 
+     The server just sends the header.

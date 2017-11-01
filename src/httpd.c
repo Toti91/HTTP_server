@@ -24,6 +24,7 @@ typedef struct clientRequest {
 	gchar* httpVersion;
 	gchar* ipAddr;
 	gchar* port;
+	bool closeConnection;
 	GString* requestBody;
 } clientRequest;
 
@@ -46,6 +47,7 @@ void logInfo(clientRequest* cr) {
 	g_string_append(logStr, cr->method);
 	g_string_append(logStr, " ");
 	g_string_append(logStr, cr->hostInfo);
+	g_string_append(logStr, cr->page);
 	g_string_append(logStr, " : ");
 	g_string_append(logStr, cr->statusCode);
 	g_string_append(logStr, "\n");
@@ -105,6 +107,11 @@ GString* handleHeader(GString* payload, clientRequest* cr, gsize contentLen) {
 			g_string_append_printf(head, "%s %lu\n", "Content-Length:", contentLen);
 			continue;
 		}
+
+		// Check if request contains the 'Connection: close' header.
+		if(g_strcmp0(lines[i], "Connection: close") == 0) {
+			cr->closeConnection = TRUE;
+		}
 		
 		g_strstrip(lines[i]);
 		g_string_append_printf(head, "%s\n", lines[i]);
@@ -130,7 +137,7 @@ GString* constructHtml(clientRequest* cr) {
 	g_string_prepend(hostUrl, "http://");
 
 	// Construct a HTML page and inject host and client information..
-	GString* ret = g_string_new("<!DOCTYPE html>\n<html><head><meta charset=\"utf-8\"><title>Test</title></head><body>");
+	GString* ret = g_string_new("<!DOCTYPE html>\n<html><head><meta charset=\"utf-8\"><title>HTTP-Server</title></head><body>");
 	g_string_append(ret, hostUrl->str);
 	g_string_append(ret, " ");
 	g_string_append(ret, cr->ipAddr);
@@ -210,6 +217,14 @@ void handleRequest(GString* payload, clientRequest* cr) {
 	}
 }
 
+bool checkVersion(clientRequest* cr) {
+	if(g_strcmp0(cr->httpVersion, "HTTP/1.1") == 0) {
+		return TRUE;
+	}
+	
+	return FALSE;
+}
+
 // Creates a new client request that holds information like the request method etc.
 clientRequest* newClientRequest(int cfd, GString* payload, struct sockaddr_in* sock) {
 	// Copy payload into fresh GString
@@ -233,6 +248,7 @@ clientRequest* newClientRequest(int cfd, GString* payload, struct sockaddr_in* s
 	cr->httpVersion = firstLine[2];
 	cr->ipAddr = inet_ntoa(sock->sin_addr);
 	cr->port = portStr;
+	cr->closeConnection = FALSE;
 	cr->requestBody = g_string_new(strstr(payload->str, "\r\n\r\n"));
 
 	// Set the correct HTTP status code corresponding to method.
@@ -271,16 +287,16 @@ int main(int argc, char *argv[])
 		exit(1);
 	}
 
-	int sockfd, status, timeout, k, opt=1, fdSize=1, connfd=-1;
+	int sockfd, status, timeout, k, j, opt=1, fdSize=1, connfd=-1, currSize=0;
 	struct sockaddr_in server, client;
 	struct pollfd fds[100];
 	int myPort = atoi(argv[1]);
 	char buff[2048];
 	socklen_t cliLen = sizeof(client);
-	bool closeConnection = FALSE;
+	bool closeConnection=FALSE, compressArr=FALSE;
 	clientRequest* cr;
 
-	timeout = (10 * 1000); // 30 second timeout
+	timeout = (30 * 1000); // 30 second timeout
 
 	// Set up socket
 	sockfd = socket(AF_INET, SOCK_STREAM, 0);
@@ -334,11 +350,11 @@ int main(int argc, char *argv[])
 
 		if(status == 0) {
 			// If poll status is 0 then connection timed out. 
-			printf("Connection timed out..\n");
 			continue;
 		}
 
-		for(int i = 0; i < fdSize; i++) {
+		currSize = fdSize;
+		for(int i = 0; i < currSize; i++) {
 	
 			if(fds[i].revents == 0) {
 				continue;
@@ -363,21 +379,21 @@ int main(int argc, char *argv[])
 				} while(connfd != -1);
 			}
 			else {
+				closeConnection = FALSE;
 				while(TRUE) {
 					// Read data from client connection into buffer.
 					memset(buff, 0, 2048);
-					status = read(fds[i].fd, buff, 2047);
+					status = recv(fds[i].fd, buff, sizeof(buff), 0);
 
 					if(status < 0) {
 						if(errno != EWOULDBLOCK) {
-							perror("recv() failed");
+							perror("read() failed");
 							closeConnection = TRUE;
 						}
 						break;
 					}
 
 					if(status == 0) {
-						printf("Connection closed..\n");
 						closeConnection = TRUE;
 						break;
 					}
@@ -387,25 +403,35 @@ int main(int argc, char *argv[])
 					cr = newClientRequest(fds[i].fd, payload, &client);
 					logInfo(cr);
 					handleRequest(payload, cr);
+
+					// If this request version is HTTP/1.0, or contains the 'Connection: close' header,
+					// then close the connection immediately
+					if(!checkVersion(cr) || cr->closeConnection) {
+						closeConnection = TRUE;
+						break;
+					}
 				}
 
 				if(closeConnection) {
 					// Close the connection and shrink the FD-array.
+					printf("CLOSING CONNECTION NO: %d\n", fds[i].fd);
 					close(fds[i].fd);
 					fds[i].fd = -1;
+					compressArr = TRUE;
+				}
+			}
+		}
 
-					for (k = 0; k < fdSize; k++)
-					{
-					  if (fds[k].fd == -1)
-					  {
-						for(int j = k; j < fdSize; j++)
-						{
-						  fds[j].fd = fds[j+1].fd;
-						}
-						k--;
-						fdSize--;
-					  }
+		if(compressArr) {
+			compressArr = FALSE;
+
+			for (k = 0; k < fdSize; k++) {
+				if (fds[k].fd == -1) {
+					for(j = k; j < fdSize; j++) {
+						fds[j].fd = fds[j + 1].fd;
 					}
+					k--;
+					fdSize--;
 				}
 			}
 		}
