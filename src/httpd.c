@@ -61,6 +61,14 @@ void logInfo(clientRequest* cr) {
 	g_string_free(logStr, TRUE);
 }
 
+bool checkVersion(clientRequest* cr) {
+	if(g_strcmp0(cr->httpVersion, "HTTP/1.1") == 0) {
+		return TRUE;
+	}
+	
+	return FALSE;
+}
+
 GString* handleHeader(GString* payload, clientRequest* cr, gsize contentLen) {
 	GString* pl = g_string_sized_new(payload->allocated_len);
 	g_string_assign(pl, payload->str);
@@ -71,55 +79,74 @@ GString* handleHeader(GString* payload, clientRequest* cr, gsize contentLen) {
 	if(g_str_has_prefix(pl->str, "POST")) {
 		g_string_assign(head, cr->httpVersion);
 		g_string_append(head, " 201 CREATED\r\n");
+		g_string_append_printf(head, "%s %lu\r\n", "Content-Length:", contentLen);
 	}
-	else if(g_str_has_prefix(pl->str, "GET") || g_str_has_prefix(pl->str, "HEAD")){
+	else if(g_str_has_prefix(pl->str, "GET")) {
 		g_string_assign(head, cr->httpVersion);
 		g_string_append(head, " 200 OK\r\n");
-		g_string_append(head, "Content-Type: text/html\r\n");
+		g_string_append(head, "Content-Type: text/html; charset=UTF-8\r\n");
+
+		// If this call is a GET request, we want to add the Content-Length header.
+		// Content-Length is a payload field which means we dont need to send it in a HEAD request.
+		// RFC 7231 (Section 3.3)
+		char contSize[4];
+		sprintf(contSize, "%zd", contentLen);
+		GString* lenStr = g_string_new("\r\n");
+		g_string_prepend(lenStr, contSize);
+
+		g_string_append(head, "Content-Length: ");
+		g_string_append(head, lenStr->str);
+		g_string_free(lenStr, TRUE);
+	}
+	else if(g_str_has_prefix(pl->str, "HEAD")) {
+		g_string_assign(head, cr->httpVersion);
+		g_string_append(head, " 200 OK\r\n");
+		g_string_append(head, "Content-Type: text/html; charset=UTF-8\r\n");
+		g_string_append(head, "Content-Length: 0\r\n");
 	}
 	else {
 		g_string_assign(head, cr->httpVersion);
 		g_string_append(head, " 501 Not implemented\r\n");
-	}
-
-	// If this call is a GET request, we want to add the Content-Length header.
-	// Content-Length is a payload field which means we dont need to send it in a HEAD request.
-	// RFC 7231 (Section 3.3)
-	if(g_str_has_prefix(pl->str, "GET")) {
-		// The Content-Length STRING shouldn't need more than 4 bytes. (max 9999 ?)
-		char contSize[4];
-		sprintf(contSize, "%zd", contentLen);
-		GString* lenStr = g_string_new("\n");
-		g_string_prepend(lenStr, contSize);
-
-		g_string_append(head, "Content-length: ");
-		g_string_append(head, lenStr->str);
-		g_string_free(lenStr, TRUE);
+		g_string_append(head, "Content-Length: 0\r\n");
 	}
 
 	// Split payload into lines.
 	gchar** lines = g_strsplit(pl->str, "\r\n", 0);
 
+
+	bool addedConnection = FALSE;
 	// Strip lines of whitespaces and add them to the header string.
 	for(unsigned int i = 0; i < g_strv_length(lines); i++) {
-		// If this is a POST request we need to inject a new Content-Length header 
-		// with the correct length of the added HTML.
-		if(g_str_has_prefix(pl->str, "POST") && g_str_has_prefix(lines[i], "Content-Length:")) {
-			g_string_append_printf(head, "%s %lu\r\n", "Content-Length:", contentLen);
-			continue;
-		}
-
 		// Check if request contains the 'Connection: close' header.
-		if(g_strcmp0(lines[i], "Connection: close") == 0) {
-			cr->closeConnection = TRUE;
+		if(checkVersion(cr)) {
+			if(g_strcmp0(lines[i], "Connection: close") == 0) {
+				cr->closeConnection = TRUE;
+				g_strstrip(lines[i]);
+				g_string_append_printf(head, "%s\r\n", lines[i]);
+			}
 		}
-		else if(g_strcmp0(lines[i], "Connection: keep-alive") == 0) {
-			cr->keepAlive = TRUE;
+		else {
+			if(g_strcmp0(lines[i], "Connection: keep-alive") == 0) {
+				cr->closeConnection = FALSE;
+				g_strstrip(lines[i]);
+				g_string_append_printf(head, "%s\r\n", lines[i]);
+			}
+			else {
+				if(addedConnection == FALSE) {
+					cr->closeConnection = TRUE;
+					g_string_append_printf(head, "%s\r\n", "Connection: close");
+					addedConnection = TRUE;
+				}
+			}
 		}
-		
-		g_strstrip(lines[i]);
-		g_string_append_printf(head, "%s\r\n", lines[i]);
+	
+		if(g_str_has_prefix(lines[i], "Content-Type:")) {
+			g_strstrip(lines[i]);
+			g_string_append_printf(head, "%s\r\n", lines[i]);
+		}
 	}
+
+	g_string_append(head, "\r\n");
 
 	// If this call is a HEAD request, then just send the header to the client connection.
 	if(g_strcmp0(cr->method, "HEAD") == 0) {
@@ -141,7 +168,7 @@ GString* constructHtml(clientRequest* cr) {
 	g_string_prepend(hostUrl, "http://");
 
 	// Construct a HTML page and inject host and client information..
-	GString* ret = g_string_new("<!DOCTYPE html>\n<html><head><meta charset=\"utf-8\"><title>HTTP-Server</title></head><body>");
+	GString* ret = g_string_new("<!DOCTYPE html>\r\n<html><head><meta charset=\"utf-8\"><title>HTTP-Server</title></head><body>");
 	g_string_append(ret, hostUrl->str);
 	g_string_append(ret, " ");
 	g_string_append(ret, cr->ipAddr);
@@ -149,7 +176,7 @@ GString* constructHtml(clientRequest* cr) {
 	g_string_append(ret, cr->port);
 	g_string_append(ret, cr->requestBody->str);
 
-	g_string_append(ret, "</body></html>\n");
+	g_string_append(ret, "</body></html>\r\n");
 
 	g_string_free(hostUrl, TRUE);
 
@@ -157,10 +184,10 @@ GString* constructHtml(clientRequest* cr) {
 }
 
 GString* constructColorHtml(gchar* col) {
-	GString* ret = g_string_new("<!DOCTYPE html>\n<html><head><meta charset=\"utf-8\"><title>HTTP-Server</title></head><body ");
+	GString* ret = g_string_new("<!DOCTYPE html>\r\n<html><head><meta charset=\"utf-8\"><title>HTTP-Server</title></head><body ");
 	g_string_append(ret, "style='background-color:");
 	g_string_append(ret, g_strsplit(col, "=", -1)[1]);
-	g_string_append(ret, "'></body></html>\n");
+	g_string_append(ret, "'></body></html>\r\n");
 
 	return ret;
 }
@@ -179,7 +206,7 @@ void sendGetResponse(GString* payload, clientRequest* cr) {
 	}
 
 	// Construct a response string with header and html page.
-	GString* header = handleHeader(payload, cr, html->len + 1);
+	GString* header = handleHeader(payload, cr, html->len);
 	GString* response = g_string_sized_new(header->allocated_len);
 	g_string_append(response, header->str);
 	g_string_append(response, html->str);
@@ -195,20 +222,17 @@ void sendGetResponse(GString* payload, clientRequest* cr) {
 
 void sendPostResponse(GString* payload, clientRequest* cr) {
 	// This is the correct content-length.
-	gsize contentLen = (constructHtml(cr)->len);
-	GString* pl = handleHeader(payload, cr, contentLen);
+	GString* html = constructHtml(cr);
+	GString* pl = handleHeader(payload, cr, html->len);
 
-	// Split the payload on header/body and insert new body.
-	gchar** split = g_strsplit(pl->str, "\n\n", 0);
-	GString* response = g_string_new(split[0]);
-
-	g_string_append(response, "\n\n");
-	g_string_append(response, constructHtml(cr)->str);
+	GString* response = g_string_sized_new(pl->allocated_len);
+	g_string_append(response, pl->str);
+	g_string_append(response, html->str);
 
 	// Send response.
 	send(cr->connfd, response->str, response->len, 0);
 
-	g_free(split);
+	g_string_free(html, TRUE);
 	g_string_free(pl, TRUE);
 	g_string_free(response, TRUE);
 }
@@ -238,14 +262,6 @@ void handleRequest(GString* payload, clientRequest* cr) {
 		sendInvalidResponse(payload, cr);
 		printf("Invalid request: %s\n", cr->method);
 	}
-}
-
-bool checkVersion(clientRequest* cr) {
-	if(g_strcmp0(cr->httpVersion, "HTTP/1.1") == 0) {
-		return TRUE;
-	}
-	
-	return FALSE;
 }
 
 // Creates a new client request that holds information like the request method etc.
@@ -364,6 +380,7 @@ int main(int argc, char *argv[])
 
 		if(status == 0) {
 			// If poll status is 0 then connection timed out. 
+			printf("timeout\n");
 			continue;
 		}
 
@@ -423,7 +440,8 @@ int main(int argc, char *argv[])
 					logInfo(cr);
 					handleRequest(payload, cr);
 
-					if(cr->keepAlive) {
+					if(cr->closeConnection == FALSE) {
+						printf("Keep-alive'in\n");
 						continue;
 					}
 					else {
