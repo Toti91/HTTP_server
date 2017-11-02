@@ -25,6 +25,7 @@ typedef struct clientRequest {
 	gchar* ipAddr;
 	gchar* port;
 	bool closeConnection;
+	bool keepAlive;
 	GString* requestBody;
 } clientRequest;
 
@@ -69,16 +70,16 @@ GString* handleHeader(GString* payload, clientRequest* cr, gsize contentLen) {
 
 	if(g_str_has_prefix(pl->str, "POST")) {
 		g_string_assign(head, cr->httpVersion);
-		g_string_append(head, " 201 CREATED\n");
+		g_string_append(head, " 201 CREATED\r\n");
 	}
 	else if(g_str_has_prefix(pl->str, "GET") || g_str_has_prefix(pl->str, "HEAD")){
 		g_string_assign(head, cr->httpVersion);
-		g_string_append(head, " 200 OK\n");
-		g_string_append(head, "Content-Type: text/html\n");
+		g_string_append(head, " 200 OK\r\n");
+		g_string_append(head, "Content-Type: text/html\r\n");
 	}
 	else {
 		g_string_assign(head, cr->httpVersion);
-		g_string_append(head, " 501 Not implemented\n");
+		g_string_append(head, " 501 Not implemented\r\n");
 	}
 
 	// If this call is a GET request, we want to add the Content-Length header.
@@ -104,7 +105,7 @@ GString* handleHeader(GString* payload, clientRequest* cr, gsize contentLen) {
 		// If this is a POST request we need to inject a new Content-Length header 
 		// with the correct length of the added HTML.
 		if(g_str_has_prefix(pl->str, "POST") && g_str_has_prefix(lines[i], "Content-Length:")) {
-			g_string_append_printf(head, "%s %lu\n", "Content-Length:", contentLen);
+			g_string_append_printf(head, "%s %lu\r\n", "Content-Length:", contentLen);
 			continue;
 		}
 
@@ -112,9 +113,12 @@ GString* handleHeader(GString* payload, clientRequest* cr, gsize contentLen) {
 		if(g_strcmp0(lines[i], "Connection: close") == 0) {
 			cr->closeConnection = TRUE;
 		}
+		else if(g_strcmp0(lines[i], "Connection: keep-alive") == 0) {
+			cr->keepAlive = TRUE;
+		}
 		
 		g_strstrip(lines[i]);
-		g_string_append_printf(head, "%s\n", lines[i]);
+		g_string_append_printf(head, "%s\r\n", lines[i]);
 	}
 
 	// If this call is a HEAD request, then just send the header to the client connection.
@@ -144,16 +148,35 @@ GString* constructHtml(clientRequest* cr) {
 	g_string_append(ret, ":");
 	g_string_append(ret, cr->port);
 	g_string_append(ret, cr->requestBody->str);
-	g_string_append(ret, "</body></html>");
+
+	g_string_append(ret, "</body></html>\n");
 
 	g_string_free(hostUrl, TRUE);
 
 	return ret;
 }
 
+GString* constructColorHtml(gchar* col) {
+	GString* ret = g_string_new("<!DOCTYPE html>\n<html><head><meta charset=\"utf-8\"><title>HTTP-Server</title></head><body ");
+	g_string_append(ret, "style='background-color:");
+	g_string_append(ret, g_strsplit(col, "=", -1)[1]);
+	g_string_append(ret, "'></body></html>\n");
+
+	return ret;
+}
+
 void sendGetResponse(GString* payload, clientRequest* cr) {
 	// Construct the HTML5 page.
-	GString* html = constructHtml(cr);
+
+	GString* html = g_string_new("");
+
+	if(g_str_has_prefix(cr->page, "/color?")) {
+		gchar* col = g_strdup(cr->page);
+		html = constructColorHtml(g_strsplit(col, "?", -1)[1]);
+	}
+	else {
+		html = constructHtml(cr);
+	}
 
 	// Construct a response string with header and html page.
 	GString* header = handleHeader(payload, cr, html->len + 1);
@@ -249,6 +272,7 @@ clientRequest* newClientRequest(int cfd, GString* payload, struct sockaddr_in* s
 	cr->ipAddr = inet_ntoa(sock->sin_addr);
 	cr->port = portStr;
 	cr->closeConnection = FALSE;
+	cr->keepAlive = FALSE;
 	cr->requestBody = g_string_new(strstr(payload->str, "\r\n\r\n"));
 
 	// Set the correct HTTP status code corresponding to method.
@@ -268,16 +292,6 @@ clientRequest* newClientRequest(int cfd, GString* payload, struct sockaddr_in* s
 	g_string_free(pl, TRUE);
 
 	return cr;
-}
-
-void destroyClientRequest(clientRequest* cr) {
-	g_free(cr->method);
-	g_free(cr->statusCode);
-	g_free(cr->page);
-	g_free(cr->hostInfo);
-	g_free(cr->httpVersion);
-	g_free(cr->port);
-	g_string_free(cr->requestBody, TRUE);
 }
 
 int main(int argc, char *argv[])
@@ -360,6 +374,10 @@ int main(int argc, char *argv[])
 				continue;
 			}
 
+			if(fds[i].revents != POLLIN) {
+				break;
+			}
+
 			if(fds[i].fd == sockfd) {
 				// Accept incoming connections and add their file descriptors to array.
 				do {
@@ -380,6 +398,7 @@ int main(int argc, char *argv[])
 			}
 			else {
 				closeConnection = FALSE;
+
 				while(TRUE) {
 					// Read data from client connection into buffer.
 					memset(buff, 0, 2048);
@@ -404,12 +423,20 @@ int main(int argc, char *argv[])
 					logInfo(cr);
 					handleRequest(payload, cr);
 
-					// If this request version is HTTP/1.0, or contains the 'Connection: close' header,
-					// then close the connection immediately
-					if(!checkVersion(cr) || cr->closeConnection) {
+					if(cr->keepAlive) {
+						continue;
+					}
+					else {
 						closeConnection = TRUE;
 						break;
 					}
+
+					// If this request version is HTTP/1.0, or contains the 'Connection: close' header,
+					// then close the connection immediately
+					/*if((!checkVersion(cr) && !cr->keepAlive) || (checkVersion(cr) && cr->closeConnection)) {
+						closeConnection = TRUE;
+						break;
+					}*/
 				}
 
 				if(closeConnection) {
@@ -444,7 +471,7 @@ int main(int argc, char *argv[])
 		}
 	}
 
-	//destroyClientRequest(cr);
+	free(cr);
 
 	return 0;
 }
