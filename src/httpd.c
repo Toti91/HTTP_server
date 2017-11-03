@@ -14,6 +14,11 @@
 #include <sys/ioctl.h>
 #include <fcntl.h>
 #include <errno.h>
+#include <time.h>
+
+#define maxSize 100
+struct pollfd fds[maxSize];
+int fdSize=1;
 
 typedef struct clientRequest {
 	int connfd;
@@ -25,7 +30,6 @@ typedef struct clientRequest {
 	gchar* ipAddr;
 	gchar* port;
 	bool closeConnection;
-	bool keepAlive;
 	GString* requestBody;
 } clientRequest;
 
@@ -102,7 +106,6 @@ GString* handleHeader(GString* payload, clientRequest* cr, gsize contentLen) {
 		g_string_assign(head, cr->httpVersion);
 		g_string_append(head, " 200 OK\r\n");
 		g_string_append(head, "Content-Type: text/html; charset=UTF-8\r\n");
-		g_string_append(head, "Content-Length: 0\r\n");
 	}
 	else {
 		g_string_assign(head, cr->httpVersion);
@@ -114,7 +117,8 @@ GString* handleHeader(GString* payload, clientRequest* cr, gsize contentLen) {
 	gchar** lines = g_strsplit(pl->str, "\r\n", 0);
 
 
-	bool addedConnection = FALSE;
+	bool addedClose = FALSE;
+	bool addedKeep = FALSE;
 	// Strip lines of whitespaces and add them to the header string.
 	for(unsigned int i = 0; i < g_strv_length(lines); i++) {
 		// Check if request contains the 'Connection: close' header.
@@ -124,7 +128,15 @@ GString* handleHeader(GString* payload, clientRequest* cr, gsize contentLen) {
 				g_strstrip(lines[i]);
 				g_string_append_printf(head, "%s\r\n", lines[i]);
 			}
+			else {
+				if(addedKeep == FALSE) {
+					cr->closeConnection = FALSE;
+					g_string_append_printf(head, "%s\r\n", "Connection: keep-alive");
+					addedKeep = TRUE;
+				}
+			}
 		}
+		// Check if requests contains 'Connection: keep-alive' header;
 		else {
 			if(g_strcmp0(lines[i], "Connection: keep-alive") == 0) {
 				cr->closeConnection = FALSE;
@@ -132,17 +144,20 @@ GString* handleHeader(GString* payload, clientRequest* cr, gsize contentLen) {
 				g_string_append_printf(head, "%s\r\n", lines[i]);
 			}
 			else {
-				if(addedConnection == FALSE) {
+				if(addedClose == FALSE) {
 					cr->closeConnection = TRUE;
 					g_string_append_printf(head, "%s\r\n", "Connection: close");
-					addedConnection = TRUE;
+					addedClose = TRUE;
 				}
 			}
 		}
-	
-		if(g_str_has_prefix(lines[i], "Content-Type:")) {
-			g_strstrip(lines[i]);
-			g_string_append_printf(head, "%s\r\n", lines[i]);
+		
+		// Get content-type header from request headers.
+		if(g_str_has_prefix(pl->str, "POST")) {
+			if(g_str_has_prefix(lines[i], "Content-Type:")) {
+				g_strstrip(lines[i]);
+				g_string_append_printf(head, "%s\r\n", lines[i]);
+			}
 		}
 	}
 
@@ -153,6 +168,7 @@ GString* handleHeader(GString* payload, clientRequest* cr, gsize contentLen) {
 		send(cr->connfd, head->str, head->len, 0);
 		g_string_free(head, TRUE);
 	}
+
 
 	g_free(lines);
 	g_string_free(pl, TRUE);
@@ -168,6 +184,7 @@ GString* constructHtml(clientRequest* cr) {
 	g_string_prepend(hostUrl, "http://");
 
 	// Construct a HTML page and inject host and client information..
+	// + request body if this is a POST request.
 	GString* ret = g_string_new("<!DOCTYPE html>\r\n<html><head><meta charset=\"utf-8\"><title>HTTP-Server</title></head><body>");
 	g_string_append(ret, hostUrl->str);
 	g_string_append(ret, " ");
@@ -175,9 +192,7 @@ GString* constructHtml(clientRequest* cr) {
 	g_string_append(ret, ":");
 	g_string_append(ret, cr->port);
 	g_string_append(ret, cr->requestBody->str);
-
 	g_string_append(ret, "</body></html>\r\n");
-
 	g_string_free(hostUrl, TRUE);
 
 	return ret;
@@ -221,7 +236,7 @@ void sendGetResponse(GString* payload, clientRequest* cr) {
 }
 
 void sendPostResponse(GString* payload, clientRequest* cr) {
-	// This is the correct content-length.
+	// Construct html and header
 	GString* html = constructHtml(cr);
 	GString* pl = handleHeader(payload, cr, html->len);
 
@@ -246,19 +261,19 @@ void sendInvalidResponse(GString* payload, clientRequest* cr) {
 }
 
 void handleRequest(GString* payload, clientRequest* cr) {
-	if(g_strcmp0(cr->method, "GET") == 0) { // GET request
+	if(g_strcmp0(cr->method, "GET") == 0) { 				// GET request
 		sendGetResponse(payload, cr);
 		printf("GET..\n");
 	}
-	else if(g_strcmp0(cr->method, "HEAD") == 0) { // HEAD request
-		handleHeader(payload, cr, 0);
+	else if(g_strcmp0(cr->method, "HEAD") == 0) { 			// HEAD request
+		handleHeader(payload, cr, constructHtml(cr)->len);
 		printf("HEAD..\n");
 	}
-	else if(g_strcmp0(cr->method, "POST") == 0) { // POST request
+	else if(g_strcmp0(cr->method, "POST") == 0) { 			// POST request
 		sendPostResponse(payload, cr);
 		printf("POST..\n");
 	}
-	else { // INVALID request
+	else {													// INVALID request
 		sendInvalidResponse(payload, cr);
 		printf("Invalid request: %s\n", cr->method);
 	}
@@ -271,10 +286,9 @@ clientRequest* newClientRequest(int cfd, GString* payload, struct sockaddr_in* s
 	g_string_assign(pl, payload->str);
 	clientRequest* cr = malloc(sizeof(clientRequest));
 	
-	// Split payload header into lines, then extract first and second lines for the information we need.
+	// Split payload header into lines, then extract first line for the information we need.
 	gchar** lines = g_strsplit(pl->str, "\r\n", 0);
 	gchar** firstLine = g_strsplit(lines[0], " ", 0);
-	gchar** secondLine = g_strsplit(lines[1], " ", 0);
 
 	// Retrieve the client port from socket.
 	char portStr[sizeof(ntohs(sock->sin_port))];
@@ -283,13 +297,18 @@ clientRequest* newClientRequest(int cfd, GString* payload, struct sockaddr_in* s
 	cr->connfd = cfd;
 	cr->method = g_strstrip(firstLine[0]);
 	cr->page = firstLine[1];
-	cr->hostInfo = secondLine[1];
 	cr->httpVersion = firstLine[2];
 	cr->ipAddr = inet_ntoa(sock->sin_addr);
 	cr->port = portStr;
 	cr->closeConnection = FALSE;
-	cr->keepAlive = FALSE;
 	cr->requestBody = g_string_new(strstr(payload->str, "\r\n\r\n"));
+
+	// Loop through header and retrieve host address.
+	for (unsigned int i = 0; i < g_strv_length(lines); i++) {
+		if (g_str_has_prefix(lines[i], "Host: ")) {
+			cr->hostInfo = &lines[i][6];
+		}
+	}
 
 	// Set the correct HTTP status code corresponding to method.
 	if(g_strcmp0(cr->method, "POST") == 0) {
@@ -304,10 +323,25 @@ clientRequest* newClientRequest(int cfd, GString* payload, struct sockaddr_in* s
 
 	g_free(lines);
 	g_free(firstLine);
-	g_free(secondLine);
 	g_string_free(pl, TRUE);
 
 	return cr;
+}
+
+void destroyConnection(int i) {
+	// Close the connection and shrink the FD-array.
+	close(fds[i].fd);
+	fds[i].fd = -1;
+
+	for (int k = 0; k < fdSize; k++) {
+		if (fds[k].fd == -1) {
+			for(int j = k; j < fdSize; j++) {
+				fds[j].fd = fds[j + 1].fd;
+			}
+			k--;
+			fdSize--;
+		}
+	}
 }
 
 int main(int argc, char *argv[])
@@ -317,40 +351,22 @@ int main(int argc, char *argv[])
 		exit(1);
 	}
 
-	int sockfd, status, timeout, k, j, opt=1, fdSize=1, connfd=-1, currSize=0;
+	int sockfd, status, pollStatus, connfd=-1, currSize=0;
 	struct sockaddr_in server, client;
-	struct pollfd fds[100];
 	int myPort = atoi(argv[1]);
 	char buff[2048];
 	socklen_t cliLen = sizeof(client);
-	bool closeConnection=FALSE, compressArr=FALSE;
 	clientRequest* cr;
 
-	timeout = (30 * 1000); // 30 second timeout
+	const int timeout = (30 * 1000); // 30 second timeout
 
 	// Set up socket
 	sockfd = socket(AF_INET, SOCK_STREAM, 0);
+	
 	memset(&server, 0, sizeof(server));
 	server.sin_family = AF_INET;
 	server.sin_addr.s_addr = htonl(INADDR_ANY);
 	server.sin_port = htons(myPort);
-
-	status = setsockopt(sockfd, SOL_SOCKET, SO_REUSEADDR, (char *)&opt, sizeof(opt));
-
-	if(status < 0) {
-		perror("Setting socket options failed");
-		close(sockfd);
-		return EXIT_FAILURE;
-	}
-
-	status = ioctl(sockfd, FIONBIO, (char *)&opt);
-
-	if(status < 0) {
-		perror("ioctl() failed");
-		close(sockfd);
-		return EXIT_FAILURE;
-	}
-
 	status = bind(sockfd, (struct sockaddr *) &server, (socklen_t) sizeof(server));
 
 	if(status < 0) {
@@ -360,33 +376,37 @@ int main(int argc, char *argv[])
 
 	printf("Listening on port %d \n\n", myPort);
 	listen(sockfd, 32);
-
 	memset(fds, 0, sizeof(fds));
 
 	// Initialize array of file descriptors with socket fd.
 	fds[0].fd = sockfd;
 	fds[0].events = POLLIN;
 
-
 	// POLLING: We received help with consideration to this tutorial: 
 	// https://www.ibm.com/support/knowledgecenter/ssw_ibm_i_71/rzab6/poll.htm
-	while(1) {	
-		status = poll(fds, fdSize, timeout);
+	while(TRUE) {
+		pollStatus = poll(fds, fdSize, timeout);
 
-		if(status < 0) {
+		if(pollStatus < 0) {
 			perror("poll() failed");
 			return EXIT_FAILURE;
 		}
 
-		if(status == 0) {
-			// If poll status is 0 then connection timed out. 
-			printf("timeout\n");
+		currSize = fdSize;
+
+		// Time out
+		if(pollStatus == 0) {
+			// Loop through file descriptors and check if they timed out.
+			for(int i = 0; i < currSize; i++) {
+				if(fds[i].revents != POLLIN && fds[i].fd != sockfd) {
+					printf("DESTROYINGG KEEP-ALIVE\n");
+					destroyConnection(i);
+				}
+			}
 			continue;
 		}
-
-		currSize = fdSize;
+		
 		for(int i = 0; i < currSize; i++) {
-	
 			if(fds[i].revents == 0) {
 				continue;
 			}
@@ -396,87 +416,59 @@ int main(int argc, char *argv[])
 			}
 
 			if(fds[i].fd == sockfd) {
-				// Accept incoming connections and add their file descriptors to array.
-				do {
-					connfd = accept(sockfd, (struct sockaddr *) &client, &cliLen);
+				// If this iteration is the socket fd then
+				// accept incoming connections and add their file descriptors to array.
+				connfd = accept(sockfd, (struct sockaddr *) &client, &cliLen);
 
-					if(connfd < 0) {
-						if(errno != EWOULDBLOCK) {
-							perror("accept() failed");
-							return EXIT_FAILURE;
-						}
-						break;
+				if(connfd < 0) {
+					// If errno is EWOULDBLOCK then we should break out of the loop.
+					if(errno != EWOULDBLOCK) {
+						perror("accept() failed");
+						return EXIT_FAILURE;
 					}
+					break;
+				}
 
-					fds[fdSize].fd = connfd;
-					fds[fdSize].events = POLLIN;
-					fdSize++;
-				} while(connfd != -1);
+				// Add new file descriptor to array.
+				fds[fdSize].fd = connfd;
+				fds[fdSize].events = POLLIN;
+				fdSize++;
 			}
 			else {
-				closeConnection = FALSE;
+				// Memset buffer for incoming data.
+				memset(buff, 0, 2048);
 
-				while(TRUE) {
-					// Read data from client connection into buffer.
-					memset(buff, 0, 2048);
+				if(fds[i].revents & POLLIN) {
 					status = recv(fds[i].fd, buff, sizeof(buff), 0);
-
-					if(status < 0) {
-						if(errno != EWOULDBLOCK) {
-							perror("read() failed");
-							closeConnection = TRUE;
-						}
-						break;
-					}
-
-					if(status == 0) {
-						closeConnection = TRUE;
-						break;
-					}
-
-					// Create a payload from buffer and initialize a new client request.
-					GString* payload = g_string_new(buff);
-					cr = newClientRequest(fds[i].fd, payload, &client);
-					logInfo(cr);
-					handleRequest(payload, cr);
-
-					if(cr->closeConnection == FALSE) {
-						printf("Keep-alive'in\n");
-						continue;
-					}
-					else {
-						closeConnection = TRUE;
-						break;
-					}
-
-					// If this request version is HTTP/1.0, or contains the 'Connection: close' header,
-					// then close the connection immediately
-					/*if((!checkVersion(cr) && !cr->keepAlive) || (checkVersion(cr) && cr->closeConnection)) {
-						closeConnection = TRUE;
-						break;
-					}*/
 				}
 
-				if(closeConnection) {
-					// Close the connection and shrink the FD-array.
-					printf("CLOSING CONNECTION NO: %d\n", fds[i].fd);
-					close(fds[i].fd);
-					fds[i].fd = -1;
-					compressArr = TRUE;
-				}
-			}
-		}
-
-		if(compressArr) {
-			compressArr = FALSE;
-
-			for (k = 0; k < fdSize; k++) {
-				if (fds[k].fd == -1) {
-					for(j = k; j < fdSize; j++) {
-						fds[j].fd = fds[j + 1].fd;
+				if(status < 0) {
+					if(errno != EWOULDBLOCK) {
+						perror("read() failed");
+						return EXIT_FAILURE;
 					}
-					k--;
-					fdSize--;
+					break;
+				}
+
+				// Done reading, no need to send data.
+				if(status == 0) {
+					continue;
+				}
+
+				// Create a payload from buffer and initialize a new client request,
+				// Then parse the request and send response.
+				GString* payload = g_string_new(buff);
+				cr = newClientRequest(fds[i].fd, payload, &client);
+				logInfo(cr);
+				handleRequest(payload, cr);
+
+				g_string_free(payload, TRUE);
+				free(cr);
+
+				// If this request contains 'Connection: close' header, then destroy it immediatly.
+				if(cr->closeConnection) {
+					printf("DESTROYINGG CONNECTION CLOSE\n");
+					destroyConnection(i);
 				}
 			}
 		}
@@ -488,8 +480,6 @@ int main(int argc, char *argv[])
 			close(fds[i].fd);
 		}
 	}
-
-	free(cr);
 
 	return 0;
 }
