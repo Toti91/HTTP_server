@@ -1,6 +1,10 @@
 This is a HTTP server written in C using UNIX sockets.
 The server supports GET, POST and HEAD requests.
 
+To run the server, run the follwing commands in the "src" directory:
+   make
+   ./httpd <port>   
+
 When the server receives a request it checks the header for method and handles the request corresponding to that method.
 
 GET: 

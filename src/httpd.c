@@ -29,9 +29,17 @@ typedef struct clientRequest {
 	gchar* httpVersion;
 	gchar* ipAddr;
 	gchar* port;
+	gchar* queries;
 	bool closeConnection;
 	GString* requestBody;
 } clientRequest;
+
+typedef struct queryParser {
+	bool color;
+	bool test;
+	gchar** queries;
+	gchar* colorVal;
+} queryParser;
 
 void logInfo(clientRequest* cr) {
 	GString* logStr;
@@ -176,7 +184,22 @@ GString* handleHeader(GString* payload, clientRequest* cr, gsize contentLen) {
 	return head;
 }
 
-GString* constructHtml(clientRequest* cr) {
+GString* constructHtml(clientRequest* cr, queryParser* qp) {
+	if(qp != NULL && qp->color) {
+		GString* ret = g_string_new("<!DOCTYPE html>\r\n<html><head><meta charset=\"utf-8\"><title>HTTP-Server</title></head><body ");
+		g_string_append(ret, "style='background-color:");
+
+		if(qp->colorVal != NULL) {
+			g_string_append(ret, qp->colorVal);
+		}
+		else {
+			g_string_append(ret, "white");
+		}
+		g_string_append(ret, "'></body></html>\r\n");
+	
+		return ret;
+	}
+
 	// Initialize a new string with the host information.
 	GString* hostUrl = g_string_new(cr->hostInfo);
 	g_string_append(hostUrl, cr->page);
@@ -192,33 +215,24 @@ GString* constructHtml(clientRequest* cr) {
 	g_string_append(ret, ":");
 	g_string_append(ret, cr->port);
 	g_string_append(ret, cr->requestBody->str);
+
+	if(qp != NULL && qp->test) {
+		g_string_append(ret, "\r\n");
+		for(unsigned int i = 0; i < g_strv_length(qp->queries); i++) {
+			g_string_append_printf(ret, "<br>%s\n", qp->queries[i]);
+		}
+	}
+
 	g_string_append(ret, "</body></html>\r\n");
 	g_string_free(hostUrl, TRUE);
 
 	return ret;
 }
 
-GString* constructColorHtml(gchar* col) {
-	GString* ret = g_string_new("<!DOCTYPE html>\r\n<html><head><meta charset=\"utf-8\"><title>HTTP-Server</title></head><body ");
-	g_string_append(ret, "style='background-color:");
-	g_string_append(ret, g_strsplit(col, "=", -1)[1]);
-	g_string_append(ret, "'></body></html>\r\n");
-
-	return ret;
-}
-
-void sendGetResponse(GString* payload, clientRequest* cr) {
+void sendGetResponse(GString* payload, clientRequest* cr, queryParser* qp) {
 	// Construct the HTML5 page.
-
 	GString* html = g_string_new("");
-
-	if(g_str_has_prefix(cr->page, "/color?")) {
-		gchar* col = g_strdup(cr->page);
-		html = constructColorHtml(g_strsplit(col, "?", -1)[1]);
-	}
-	else {
-		html = constructHtml(cr);
-	}
+	html = constructHtml(cr, qp);
 
 	// Construct a response string with header and html page.
 	GString* header = handleHeader(payload, cr, html->len);
@@ -235,9 +249,9 @@ void sendGetResponse(GString* payload, clientRequest* cr) {
 	g_string_free(response, TRUE);
 }
 
-void sendPostResponse(GString* payload, clientRequest* cr) {
+void sendPostResponse(GString* payload, clientRequest* cr, queryParser* qp) {
 	// Construct html and header
-	GString* html = constructHtml(cr);
+	GString* html = constructHtml(cr, qp);
 	GString* pl = handleHeader(payload, cr, html->len);
 
 	GString* response = g_string_sized_new(pl->allocated_len);
@@ -260,27 +274,28 @@ void sendInvalidResponse(GString* payload, clientRequest* cr) {
 	g_string_free(response, TRUE);
 }
 
-void handleRequest(GString* payload, clientRequest* cr) {
+void handleRequest(GString* payload, clientRequest* cr, queryParser* qp) {
+	printf("Got a request of type:\n");
 	if(g_strcmp0(cr->method, "GET") == 0) { 				// GET request
-		sendGetResponse(payload, cr);
-		printf("GET..\n");
+		sendGetResponse(payload, cr, qp);
+		printf("GET..\n\n");
 	}
 	else if(g_strcmp0(cr->method, "HEAD") == 0) { 			// HEAD request
-		handleHeader(payload, cr, constructHtml(cr)->len);
-		printf("HEAD..\n");
+		handleHeader(payload, cr, constructHtml(cr, qp)->len);
+		printf("HEAD..\n\n");
 	}
 	else if(g_strcmp0(cr->method, "POST") == 0) { 			// POST request
-		sendPostResponse(payload, cr);
-		printf("POST..\n");
+		sendPostResponse(payload, cr, qp);
+		printf("POST..\n\n");
 	}
 	else {													// INVALID request
 		sendInvalidResponse(payload, cr);
-		printf("Invalid request: %s\n", cr->method);
+		printf("Invalid request: %s\n\n", cr->method);
 	}
 }
 
 // Creates a new client request that holds information like the request method etc.
-clientRequest* newClientRequest(int cfd, GString* payload, struct sockaddr_in* sock) {
+clientRequest* newClientRequest(int cfd, GString* payload, gchar* sinAddr, gchar* cliPort) {
 	// Copy payload into fresh GString
 	GString* pl = g_string_sized_new(payload->allocated_len);
 	g_string_assign(pl, payload->str);
@@ -289,17 +304,17 @@ clientRequest* newClientRequest(int cfd, GString* payload, struct sockaddr_in* s
 	// Split payload header into lines, then extract first line for the information we need.
 	gchar** lines = g_strsplit(pl->str, "\r\n", 0);
 	gchar** firstLine = g_strsplit(lines[0], " ", 0);
-
-	// Retrieve the client port from socket.
-	char portStr[sizeof(ntohs(sock->sin_port))];
-	sprintf(portStr, "%d", ntohs(sock->sin_port));
-
+	
 	cr->connfd = cfd;
 	cr->method = g_strstrip(firstLine[0]);
-	cr->page = firstLine[1];
 	cr->httpVersion = firstLine[2];
-	cr->ipAddr = inet_ntoa(sock->sin_addr);
-	cr->port = portStr;
+
+	gchar** splitURL = g_strsplit_set(firstLine[1], ":?#[]@", 2);
+	cr->page = splitURL[0];
+	cr->queries = splitURL[1];
+
+	cr->ipAddr = sinAddr;
+	cr->port = cliPort;
 	cr->closeConnection = FALSE;
 	cr->requestBody = g_string_new(strstr(payload->str, "\r\n\r\n"));
 
@@ -326,6 +341,37 @@ clientRequest* newClientRequest(int cfd, GString* payload, struct sockaddr_in* s
 	g_string_free(pl, TRUE);
 
 	return cr;
+}
+
+queryParser* newQueryParser(clientRequest* cr) {
+	queryParser* qp = malloc(sizeof(queryParser));
+	gchar** queryLines = g_strsplit_set(cr->queries, "!$&'()*+,;", -1);
+	qp->queries = queryLines;
+
+	if(g_str_has_prefix(cr->page, "/color") && g_str_has_suffix(cr->page, "/color")) {
+		qp->color = TRUE;
+	}
+	else {
+		qp->color = FALSE;
+	}
+
+	if(g_str_has_prefix(cr->page, "/test") && g_str_has_suffix(cr->page, "/test")) {
+		qp->test = TRUE;
+	}
+	else {
+		qp->test = FALSE;
+	}
+
+	if(qp->color) {
+		for(unsigned int i = 0; i < g_strv_length(queryLines); i++) {
+			if(g_str_has_prefix(queryLines[i], "bg=")){
+				qp->colorVal = g_strsplit(queryLines[i], "=", 2)[1];
+			}
+		}
+	}
+
+	return qp;
+
 }
 
 void destroyConnection(int i) {
@@ -358,7 +404,7 @@ int main(int argc, char *argv[])
 	socklen_t cliLen = sizeof(client);
 	clientRequest* cr;
 
-	const int timeout = (30 * 1000); // 30 second timeout
+	const int timeout = (10 * 1000); // 30 second timeout
 
 	// Set up socket
 	sockfd = socket(AF_INET, SOCK_STREAM, 0);
@@ -399,7 +445,6 @@ int main(int argc, char *argv[])
 			// Loop through file descriptors and check if they timed out.
 			for(int i = 0; i < currSize; i++) {
 				if(fds[i].revents != POLLIN && fds[i].fd != sockfd) {
-					printf("DESTROYINGG KEEP-ALIVE\n");
 					destroyConnection(i);
 				}
 			}
@@ -455,20 +500,31 @@ int main(int argc, char *argv[])
 					continue;
 				}
 
+				// Retrieve the IP and client port from socket.
+				gchar* sinAddr = inet_ntoa(client.sin_addr);
+				char portStr[sizeof(ntohs(client.sin_port))];
+				sprintf(portStr, "%d", ntohs(client.sin_port));
+
 				// Create a payload from buffer and initialize a new client request,
 				// Then parse the request and send response.
 				GString* payload = g_string_new(buff);
-				cr = newClientRequest(fds[i].fd, payload, &client);
+				cr = newClientRequest(fds[i].fd, payload, sinAddr, portStr);
 				logInfo(cr);
-				handleRequest(payload, cr);
+
+				if(cr->queries != NULL) {
+					queryParser* qp = newQueryParser(cr);
+					handleRequest(payload, cr, qp);
+				}
+				else {
+					handleRequest(payload, cr, NULL);
+				}
 
 				g_string_free(payload, TRUE);
-				free(cr);
 
 				// If this request contains 'Connection: close' header, then destroy it immediatly.
 				if(cr->closeConnection) {
-					printf("DESTROYINGG CONNECTION CLOSE\n");
 					destroyConnection(i);
+					free(cr);
 				}
 			}
 		}
